@@ -45,3 +45,7 @@ Thumbs.db
 
 # Docker
 *.tar
+
+# Deployment instructions (local only)
+DOCKER_HUB_DEPLOYMENT.md
+deploy-v1.1.sh
