@@ -46,6 +46,8 @@ Thumbs.db
 # Docker
 *.tar
 
-# Deployment instructions (local only)
+# Deployment instructions and test results (local only - contain sensitive data)
 DOCKER_HUB_DEPLOYMENT.md
 deploy-v1.1.sh
+V2_COMPLETE.md
+TEST_RESULTS_v1.1.md
