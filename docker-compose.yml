@@ -1,0 +1,33 @@
+services:
+  ml_api:
+    image: ghcr.io/gabe565/obico/ml-api
+    container_name: ml_api
+    environment:
+      DEBUG: 'True'
+      FLASK_APP: 'server.py'
+      NVIDIA_VISIBLE_DEVICES: all
+    restart: unless-stopped
+    tty: true
+    runtime: nvidia
+    command: [gunicorn, --bind=0.0.0.0:3333, --workers=1, --timeout=30, --access-logfile=-, wsgi]
+
+  print-monitor:
+    build: ./monitor
+    container_name: print-monitor
+    env_file:
+      - .env
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      ml_api:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./monitor/logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
