@@ -61,7 +61,7 @@
         .status-failure { color: #f44336; }
         .status-error { color: #ff9800; }
         .status-starting { color: #2196f3; }
-        .status-monitoring { color: #9e9e9e; }
+        .status-idle { color: #9e9e9e; }
         .status-standby { color: #9c27b0; }
 
         .indicator {
@@ -76,7 +76,7 @@
         .indicator-failure { background-color: #f44336; box-shadow: 0 0 10px #f44336; }
         .indicator-error { background-color: #ff9800; box-shadow: 0 0 10px #ff9800; }
         .indicator-starting { background-color: #2196f3; box-shadow: 0 0 10px #2196f3; }
-        .indicator-monitoring { background-color: #9e9e9e; box-shadow: 0 0 10px #9e9e9e; }
+        .indicator-idle { background-color: #9e9e9e; box-shadow: 0 0 10px #9e9e9e; }
         .indicator-standby { background-color: #9c27b0; box-shadow: 0 0 10px #9c27b0; }
         .indicator-inactive { background-color: #666; }
 
@@ -244,7 +244,7 @@
             </div>
 
             <div class="status-card">
-                <h2>Detection Confidence</h2>
+                <h2>Failure Confidence</h2>
                 <div class="status-value" id="confidence">0%</div>
                 <div class="status-timestamp">Failure threshold: <span id="threshold">60%</span></div>
             </div>
@@ -322,7 +322,7 @@
                         'failure': 'Failure Detected!',
                         'error': 'System Error',
                         'starting': 'Starting...',
-                        'monitoring': 'Monitoring (No Print)',
+                        'idle': 'Idle',
                         'standby': 'Standby Mode 💤'
                     };
                     statusText.textContent = statusTexts[data.current_status] || 'Unknown';

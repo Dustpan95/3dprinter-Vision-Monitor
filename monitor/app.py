@@ -48,6 +48,11 @@ class Config:
     DETECTION_THRESHOLD = float(os.getenv('DETECTION_THRESHOLD', '0.6'))
     ML_API_TIMEOUT = int(os.getenv('ML_API_TIMEOUT', '15'))
 
+    # Motion Detection
+    MOTION_INTENSITY_THRESHOLD = int(os.getenv('MOTION_INTENSITY_THRESHOLD', '30'))
+    MOTION_PIXEL_THRESHOLD = int(os.getenv('MOTION_PIXEL_THRESHOLD', '500'))
+    IDLE_TIMEOUT = int(os.getenv('IDLE_TIMEOUT', '60'))
+
     # Web UI - Internal port is always 8080, external port mapping is in docker-compose
     INTERNAL_PORT = 8080
     WEB_PORT = int(os.getenv('WEB_PORT', '8080'))  # Only used for logging external port
@@ -87,6 +92,8 @@ class State:
         self.stream_connected: bool = False
         self.total_checks: int = 0
         self.failed_checks: int = 0
+        # Motion detection
+        self.last_motion_time: Optional[datetime] = None
         # Standby mode
         self.standby_mode: bool = False
         self.last_activity_time: Optional[datetime] = datetime.now()
@@ -112,6 +119,7 @@ class State:
                 'total_checks': self.total_checks,
                 'failed_checks': self.failed_checks,
                 'last_frame': self.last_frame_base64,
+                'last_motion_time': self.last_motion_time.isoformat() if self.last_motion_time else None,
                 'standby_mode': self.standby_mode,
                 'standby_enabled': Config.STANDBY_MODE_ENABLED,
                 'ml_container_running': self.ml_container_running
@@ -337,16 +345,20 @@ class MQTTHandler:
 
 mqtt_handler = MQTTHandler()
 
-# RTSP Stream Handler
+# RTSP Stream Handler with background reader to avoid buffered/stale frames
 class RTSPStreamHandler:
     def __init__(self):
         self.cap: Optional[cv2.VideoCapture] = None
+        self.latest_frame: Optional[np.ndarray] = None
+        self.frame_lock = threading.Lock()
+        self.reader_thread: Optional[threading.Thread] = None
+        self.running = False
         self.last_connection_attempt = 0
         self.connection_retry_delay = 60  # seconds - retry every minute
-        self.logged_error = False  # Track if we've already logged the error
+        self.logged_error = False
 
     def connect(self) -> bool:
-        """Connect to RTSP stream with retry logic"""
+        """Connect to RTSP stream and start background reader"""
         current_time = time.time()
         if current_time - self.last_connection_attempt < self.connection_retry_delay:
             return False
@@ -363,6 +375,10 @@ class RTSPStreamHandler:
                 logger.info("✓ Successfully connected to RTSP stream")
                 state.update(stream_connected=True, error_message=None)
                 self.logged_error = False
+                # Start background reader thread
+                self.running = True
+                self.reader_thread = threading.Thread(target=self._reader_loop, name="RTSPReader", daemon=True)
+                self.reader_thread.start()
                 return True
             else:
                 if not self.logged_error:
@@ -381,34 +397,70 @@ class RTSPStreamHandler:
             state.update(stream_connected=False, error_message=str(e))
             return False
 
+    def _reader_loop(self):
+        """Continuously reads frames, keeping only the latest one"""
+        while self.running and self.cap and self.cap.isOpened():
+            try:
+                ret, frame = self.cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    with self.frame_lock:
+                        self.latest_frame = frame
+                else:
+                    logger.warning("Background reader: failed to read frame")
+                    state.update(stream_connected=False)
+                    break
+            except Exception as e:
+                logger.error(f"Background reader error: {e}")
+                state.update(stream_connected=False)
+                break
+        logger.info("RTSP reader thread stopped")
+
     def get_frame(self) -> Optional[np.ndarray]:
-        """Capture a single frame from the stream"""
-        if not self.cap or not self.cap.isOpened():
+        """Get the latest frame captured by the background reader"""
+        if not self.running or not self.reader_thread or not self.reader_thread.is_alive():
             if not self.connect():
                 return None
 
-        try:
-            ret, frame = self.cap.read()
-            if ret and frame is not None and frame.size > 0:
-                return frame
-            else:
-                logger.warning("Failed to read frame from stream")
-                state.update(stream_connected=False)
-                self.disconnect()
-                return None
-        except Exception as e:
-            logger.error(f"Error reading frame: {e}")
-            self.disconnect()
-            return None
+        with self.frame_lock:
+            frame = self.latest_frame
+            self.latest_frame = None  # consume it so next call waits for a new one
+        return frame
 
     def disconnect(self):
-        """Disconnect from RTSP stream"""
+        """Stop reader and disconnect from RTSP stream"""
+        self.running = False
+        if self.reader_thread:
+            self.reader_thread.join(timeout=3)
+            self.reader_thread = None
         if self.cap:
             self.cap.release()
             self.cap = None
+        self.latest_frame = None
         state.update(stream_connected=False)
 
 stream_handler = RTSPStreamHandler()
+
+# Motion Detector
+class MotionDetector:
+    def __init__(self):
+        self.prev_frame_gray: Optional[np.ndarray] = None
+
+    def detect(self, frame: np.ndarray) -> bool:
+        """Compare current frame to previous, return True if motion detected"""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        motion = False
+        if self.prev_frame_gray is not None:
+            diff = cv2.absdiff(self.prev_frame_gray, gray)
+            changed_pixels = np.count_nonzero(diff > Config.MOTION_INTENSITY_THRESHOLD)
+            motion = changed_pixels > Config.MOTION_PIXEL_THRESHOLD
+            logger.debug(f"Motion check: {changed_pixels} changed pixels (threshold: {Config.MOTION_PIXEL_THRESHOLD})")
+
+        self.prev_frame_gray = gray
+        return motion
+
+motion_detector = MotionDetector()
 
 # ML API Handler
 class MLAPIHandler:
@@ -495,13 +547,7 @@ def monitor_loop():
 
     while not shutdown_event.is_set():
         try:
-            # Check if in standby mode
-            if state.standby_mode:
-                logger.debug("In standby mode - skipping ML checks")
-                time.sleep(Config.CHECK_INTERVAL_SECONDS)
-                continue
-
-            # Get frame from stream
+            # Get frame from stream (always needed for motion detection)
             frame = stream_handler.get_frame()
 
             if frame is None:
@@ -513,15 +559,57 @@ def monitor_loop():
                 time.sleep(Config.CHECK_INTERVAL_SECONDS)
                 continue
 
+            # Draw timestamp overlay on frame
+            now = datetime.now()
+            timestamp_text = now.strftime('%Y-%m-%d %H:%M:%S')
+            cv2.putText(frame, timestamp_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(frame, timestamp_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1, cv2.LINE_AA)
+
             # Update state with frame
             frame_b64 = frame_to_base64(frame)
             state.update(
                 last_frame=frame,
                 last_frame_base64=frame_b64,
-                last_check_time=datetime.now()
+                last_check_time=now
             )
 
-            # Analyze frame with ML API
+            # Motion detection
+            motion = motion_detector.detect(frame)
+            if motion:
+                state.update(last_motion_time=datetime.now())
+                # Exit standby if motion detected while in standby
+                if state.standby_mode:
+                    logger.info("Motion detected while in standby - exiting standby")
+                    docker_handler.exit_standby()
+
+            # Determine if printer is active based on recent motion
+            is_active = (state.last_motion_time is not None and
+                         (datetime.now() - state.last_motion_time).total_seconds() < Config.IDLE_TIMEOUT)
+
+            if not is_active:
+                logger.debug("Idle - no motion detected")
+                state.update(current_status='idle', error_message=None)
+
+                # Check for auto-standby
+                if Config.STANDBY_MODE_ENABLED and Config.STANDBY_AUTO_TIMEOUT > 0 and not state.standby_mode:
+                    if state.last_activity_time:
+                        time_since_activity = (datetime.now() - state.last_activity_time).total_seconds()
+                        if time_since_activity > Config.STANDBY_AUTO_TIMEOUT:
+                            logger.info(f"Auto-standby: {int(time_since_activity)}s since last activity (threshold: {Config.STANDBY_AUTO_TIMEOUT}s)")
+                            docker_handler.enter_standby()
+
+                time.sleep(Config.CHECK_INTERVAL_SECONDS)
+                continue
+
+            # Active but ML container not ready yet (warming up after standby exit)
+            if state.standby_mode:
+                logger.debug("Waiting for ML container after standby exit")
+                time.sleep(Config.CHECK_INTERVAL_SECONDS)
+                continue
+
+            # Active - analyze frame with ML API
             result = ml_api_handler.analyze_frame(frame)
 
             if result is None:
@@ -533,18 +621,18 @@ def monitor_loop():
                 )
             else:
                 # Parse ML API response
-                # Obico ML API returns: {"detections": [...], "classes": [...]}
-                # We check if there are any detections above threshold
+                # Obico ML API returns: {"detections": [[name, confidence, [x, y, w, h]], ...]}
                 detections = result.get('detections', [])
+                logger.info(f"ML API raw response: {result}")
 
                 max_confidence = 0.0
                 failure_detected = False
 
                 if detections:
-                    # Get maximum confidence from detections
+                    # Each detection is [name, confidence, [x, y, w, h]]
                     for detection in detections:
-                        if isinstance(detection, list) and len(detection) >= 5:
-                            confidence = detection[4]  # confidence is typically 5th element
+                        if isinstance(detection, list) and len(detection) >= 3:
+                            confidence = detection[1]
                             max_confidence = max(max_confidence, confidence)
                             if confidence >= Config.DETECTION_THRESHOLD:
                                 failure_detected = True
@@ -571,21 +659,8 @@ def monitor_loop():
                         'detections': detections
                     }
                     mqtt_handler.publish(Config.MQTT_TOPIC_FAILURE, failure_message, qos=2)
-                elif max_confidence < 0.05:
-                    # Very low confidence - likely no print or nothing significant
-                    logger.info(f"Monitoring - No significant activity detected (Confidence: {max_confidence:.2%})")
-                    state.update(current_status='monitoring', error_message=None)
-
-                    # Check for auto-standby
-                    if Config.STANDBY_MODE_ENABLED and Config.STANDBY_AUTO_TIMEOUT > 0:
-                        if state.last_activity_time:
-                            time_since_activity = (datetime.now() - state.last_activity_time).total_seconds()
-                            if time_since_activity > Config.STANDBY_AUTO_TIMEOUT:
-                                logger.info(f"Auto-standby: {int(time_since_activity)}s since last activity (threshold: {Config.STANDBY_AUTO_TIMEOUT}s)")
-                                docker_handler.enter_standby()
                 else:
-                    # Low-medium confidence - print appears OK
-                    logger.info(f"Print OK - Confidence: {max_confidence:.2%}")
+                    logger.info("Print OK - No failure detected")
                     state.update(
                         current_status='ok',
                         error_message=None,
@@ -665,7 +740,7 @@ def latest_frame():
 @app.route('/health')
 def health():
     """Health check endpoint for Docker"""
-    if state.current_status in ['ok', 'failure', 'starting', 'monitoring', 'standby']:
+    if state.current_status in ['ok', 'failure', 'starting', 'idle', 'standby']:
         return jsonify({'status': 'healthy'}), 200
     else:
         return jsonify({'status': 'unhealthy', 'error': state.error_message}), 503
@@ -743,6 +818,7 @@ def main():
     logger.info(f"Heartbeat Interval: {Config.MQTT_HEARTBEAT_INTERVAL}s")
     logger.info(f"Detection Threshold: {Config.DETECTION_THRESHOLD}")
     logger.info(f"Web UI Port: {Config.WEB_PORT}")
+    logger.info(f"Motion Detection: intensity>{Config.MOTION_INTENSITY_THRESHOLD}, pixels>{Config.MOTION_PIXEL_THRESHOLD}, idle_timeout={Config.IDLE_TIMEOUT}s")
     logger.info(f"Standby Mode: {'ENABLED' if Config.STANDBY_MODE_ENABLED else 'DISABLED'}")
     if Config.STANDBY_MODE_ENABLED:
         logger.info(f"  → Auto-Standby Timeout: {Config.STANDBY_AUTO_TIMEOUT}s ({Config.STANDBY_AUTO_TIMEOUT/60:.1f} min)")
