@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v1.1.0.html).
 
+## [1.1.1] - 2026-02-03
+
+### Fixed
+- **ML detection parsing**: Obico ML API returns detections as `[name, confidence, bbox]` (3 elements). Was incorrectly checking for 5 elements and reading confidence from index 4. Now correctly reads from index 1.
+- **RTSP frame staleness**: OpenCV buffers RTSP frames internally, causing stale images to be served when only reading every 10 seconds. Replaced single-read approach with a background reader thread that continuously consumes frames, so `get_frame()` always returns the latest.
+- **Status logic**: Failure-only ML model was mapped to a 3-tier confidence system (idle/ok/failure), but the model only outputs on failure — a normal print and an empty bed both returned 0%. Replaced with motion-based detection: motion detected = printing, no motion = idle. ML checks only run when active.
+
+### Added
+- **Motion detection**: Frame-to-frame pixel differencing determines whether the printer is actively printing or idle. Configurable via `MOTION_INTENSITY_THRESHOLD`, `MOTION_PIXEL_THRESHOLD`, and `IDLE_TIMEOUT`.
+- **Timestamp overlay**: Live timestamp drawn on each frame for visual confirmation the feed is updating.
+- **Auto-standby via motion**: Auto-standby now triggers based on idle state from motion detection instead of the broken confidence threshold. Motion detected while in standby automatically resumes monitoring.
+
+### Changed
+- Renamed "Detection Confidence" to "Failure Confidence" in web UI for clarity — the value represents how confident the model is that a failure is occurring, not general print detection.
+- Replaced `monitoring` status with `idle` status in UI and health checks.
+
+---
+
 ## [1.1.0] - 2026-02-02
 
 ### Added
@@ -125,5 +143,6 @@ Save GPU VRAM when your printer is idle! The new standby mode completely stops t
 
 ---
 
-[1.1.0]: https://github.com/yourusername/print-monitor/releases/tag/v1.1.0
-[1.0.0]: https://github.com/yourusername/print-monitor/releases/tag/v1.0.0
+[1.1.1]: https://github.com/Dustpan95/3dprinter-Vision-Monitor/releases/tag/v1.1.1
+[1.1.0]: https://github.com/Dustpan95/3dprinter-Vision-Monitor/releases/tag/v1.1.0
+[1.0.0]: https://github.com/Dustpan95/3dprinter-Vision-Monitor/releases/tag/v1.0.0

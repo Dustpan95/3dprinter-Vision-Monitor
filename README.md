@@ -77,6 +77,9 @@ http://your-server-ip:8090
 | `CHECK_INTERVAL_SECONDS` | Frame check interval | 10 |
 | `DETECTION_THRESHOLD` | Failure threshold (0.0-1.0) | 0.6 |
 | `WEB_PORT` | Web UI port | 8090 |
+| `MOTION_INTENSITY_THRESHOLD` | Min pixel intensity diff to count as changed | 30 |
+| `MOTION_PIXEL_THRESHOLD` | Min changed pixels to register as motion | 500 |
+| `IDLE_TIMEOUT` | Seconds without motion before going idle | 60 |
 | `STANDBY_MODE_ENABLED` | Enable standby mode | true |
 | `STANDBY_AUTO_TIMEOUT` | Auto-standby timeout (seconds) | 300 |
 | `ML_API_CONTAINER_NAME` | ML container name | ml_api |
@@ -87,6 +90,16 @@ The `DETECTION_THRESHOLD` controls sensitivity:
 - **Lower (0.4-0.5)**: More sensitive, may have false positives
 - **Default (0.6)**: Balanced detection
 - **Higher (0.7-0.8)**: Less sensitive, fewer false alarms
+
+### Motion Detection
+
+The monitor uses frame-to-frame pixel differencing to determine whether the printer is actively printing or idle. This avoids the need for a printer API and works with any printer.
+
+- **`MOTION_INTENSITY_THRESHOLD`** — Minimum pixel value difference (0-255) to count a pixel as "changed". Higher values ignore subtle lighting changes. Default: `30`
+- **`MOTION_PIXEL_THRESHOLD`** — Minimum number of changed pixels to consider motion detected. Higher values require more movement. Default: `500`
+- **`IDLE_TIMEOUT`** — How many seconds without motion before the status switches to idle. Default: `60`
+
+When idle, ML failure checks are skipped. If motion is detected while in standby, the monitor automatically exits standby and resumes ML checks.
 
 ### Standby Mode (VRAM Management) 💤
 
@@ -130,9 +143,9 @@ Set `STANDBY_MODE_ENABLED=false` to disable standby features entirely. ML contai
 | Status | Meaning | When |
 |--------|---------|------|
 | 🔵 Starting | Initializing | First 5-10 seconds |
-| ⚫ Monitoring | No significant activity | Idle, no print detected |
-| 🟢 OK | Print running normally | Active print, no issues |
-| 🔴 Failure | Print failure detected | Confidence > threshold |
+| ⚫ Idle | No motion detected | Printer idle, ML checks skipped |
+| 🟢 OK | Print running normally | Motion detected, no failure |
+| 🔴 Failure | Print failure detected | Failure confidence > threshold |
 | 🟠 Error | System error | Camera/MQTT/ML API issue |
 | 💤 Standby | VRAM freed | ML container stopped to save resources |
 
